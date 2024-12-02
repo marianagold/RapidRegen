@@ -2,33 +2,17 @@ import pygame
 import numpy as np
 import random
 import math
+import csv
+import os
 
-# Initialize Pygame
 pygame.init()
 
-# Colors
 WHITE = (255, 255, 255)
 RED = (255, 0, 0)
 BLUE = (0, 0, 255)
 GRAY = (128, 128, 128)
 GREEN = (0, 255, 0)
 YELLOW = (255, 255, 0)
-BLACK = (0, 0, 0)
-
-class Obstacle:
-    def __init__(self, x, y, width, height):
-        self.x = x
-        self.y = y
-        self.width = width
-        self.height = height
-        
-    def check_collision(self, x, y, radius):
-        # Check if a point (with radius) intersects with the obstacle
-        closest_x = max(self.x, min(x, self.x + self.width))
-        closest_y = max(self.y, min(y, self.y + self.height))
-        
-        distance = math.hypot(x - closest_x, y - closest_y)
-        return distance < radius
 
 class Puck:
     def __init__(self, x, y):
@@ -42,7 +26,7 @@ class HomeRegion:
         self.collected_pucks = 0
 
 class Robot:
-    def __init__(self, x, y, arena_size, D, vision_range, robot_radius, home_regions, obstacles):
+    def __init__(self, x, y, arena_size, D, vision_range, robot_radius, home_regions):
         self.x = x
         self.y = y
         self.angle = random.uniform(0, 2*math.pi)
@@ -55,43 +39,14 @@ class Robot:
         self.origin_x = x
         self.origin_y = y
         self.vision_range = vision_range
-        self.vision_angle = math.pi/4
+        self.vision_angle = math.pi/4 
         self.robot_radius = robot_radius
         self.collision_range = 2 * robot_radius
-        self.obstacles = obstacles
-        self.obstacle_avoidance_range = 3 * robot_radius
 
     def find_nearest_home(self, x, y):
         nearest_home = min(self.home_regions, 
                          key=lambda h: math.hypot(h.x - x, h.y - y))
         return nearest_home
-
-    def check_obstacle_collision(self, new_x, new_y):
-        for obstacle in self.obstacles:
-            if obstacle.check_collision(new_x, new_y, self.robot_radius):
-                return True
-        return False
-
-    def obstacle_avoidance_vector(self, x, y):
-        avoid_dx = 0
-        avoid_dy = 0
-        
-        for obstacle in self.obstacles:
-            # Find closest point on obstacle
-            closest_x = max(obstacle.x, min(x, obstacle.x + obstacle.width))
-            closest_y = max(obstacle.y, min(y, obstacle.y + obstacle.height))
-            
-            dx = x - closest_x
-            dy = y - closest_y
-            distance = math.hypot(dx, dy)
-            
-            if distance < self.obstacle_avoidance_range and distance > 0:
-                # Calculate repulsion force
-                repulsion = (self.obstacle_avoidance_range - distance) / self.obstacle_avoidance_range
-                avoid_dx += (dx / distance) * repulsion * 2  # Increased weight for obstacles
-                avoid_dy += (dy / distance) * repulsion * 2
-                
-        return avoid_dx, avoid_dy
 
     def move(self, robots):
         if self.state == 'searching':
@@ -105,37 +60,25 @@ class Robot:
             dx = (self.origin_x - self.x)
             dy = (self.origin_y - self.y)
 
-        # Normalize movement vector
         distance = math.hypot(dx, dy)
         if distance != 0:
             dx /= distance
             dy /= distance
 
-        # Get avoidance vectors
-        robot_avoid_dx, robot_avoid_dy = self.collision_avoidance(robots)
-        obstacle_avoid_dx, obstacle_avoid_dy = self.obstacle_avoidance_vector(self.x, self.y)
+        avoid_dx, avoid_dy = self.collision_avoidance(robots)
 
-        # Combine movement vectors
-        total_dx = dx + robot_avoid_dx + obstacle_avoid_dx
-        total_dy = dy + robot_avoid_dy + obstacle_avoid_dy
+        total_dx = dx + avoid_dx
+        total_dy = dy + avoid_dy
 
-        # Normalize total movement vector
         total_distance = math.hypot(total_dx, total_dy)
         if total_distance != 0:
             total_dx /= total_distance
             total_dy /= total_distance
 
-        # Try to move to new position
-        new_x = np.clip(self.x + total_dx, 0, self.arena_size)
-        new_y = np.clip(self.y + total_dy, 0, self.arena_size)
-        
-        # Only update position if it doesn't cause collision
-        if not self.check_obstacle_collision(new_x, new_y):
-            self.x = new_x
-            self.y = new_y
-            self.angle = math.atan2(total_dy, total_dx)
+        self.x = np.clip(self.x + total_dx, 0, self.arena_size)
+        self.y = np.clip(self.y + total_dy, 0, self.arena_size)
+        self.angle = math.atan2(total_dy, total_dx)
 
-        # State transitions
         if self.state == 'searching' and np.hypot(self.x - self.origin_x, self.y - self.origin_y) > self.D:
             self.state = 'returning'
         elif self.state == 'returning' and np.hypot(self.x - self.origin_x, self.y - self.origin_y) < self.D/2:
@@ -161,63 +104,14 @@ class Robot:
         return avoid_dx, avoid_dy
 
     def can_see_puck(self, puck):
-        # First check if puck is within vision range
         dx = puck.x - self.x
         dy = puck.y - self.y
         distance = math.hypot(dx, dy)
         if distance > self.vision_range:
             return False
-            
-        # Check if puck is within vision angle
         angle_to_puck = math.atan2(dy, dx)
         angle_diff = abs((angle_to_puck - self.angle + math.pi) % (2 * math.pi) - math.pi)
-        if angle_diff > self.vision_angle / 2:
-            return False
-            
-        # Check if any obstacles block the line of sight
-        for obstacle in self.obstacles:
-            # Check if line intersects with obstacle
-            # Using simplified line-rectangle intersection
-            line_start = (self.x, self.y)
-            line_end = (puck.x, puck.y)
-            
-            # Check if line intersects any of the obstacle's edges
-            if self.line_intersects_rectangle(line_start, line_end, 
-                                           (obstacle.x, obstacle.y), 
-                                           (obstacle.width, obstacle.height)):
-                return False
-                
-        return True
-
-    def line_intersects_rectangle(self, line_start, line_end, rect_pos, rect_size):
-        # Convert rectangle to four lines and check intersection with each
-        rect_lines = [
-            ((rect_pos[0], rect_pos[1]), (rect_pos[0] + rect_size[0], rect_pos[1])),
-            ((rect_pos[0] + rect_size[0], rect_pos[1]), (rect_pos[0] + rect_size[0], rect_pos[1] + rect_size[1])),
-            ((rect_pos[0] + rect_size[0], rect_pos[1] + rect_size[1]), (rect_pos[0], rect_pos[1] + rect_size[1])),
-            ((rect_pos[0], rect_pos[1] + rect_size[1]), (rect_pos[0], rect_pos[1]))
-        ]
-        
-        for rect_line in rect_lines:
-            if self.line_intersects_line(line_start, line_end, rect_line[0], rect_line[1]):
-                return True
-        return False
-
-    def line_intersects_line(self, line1_start, line1_end, line2_start, line2_end):
-        # Returns True if the lines intersect
-        x1, y1 = line1_start
-        x2, y2 = line1_end
-        x3, y3 = line2_start
-        x4, y4 = line2_end
-        
-        denominator = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
-        if denominator == 0:
-            return False
-            
-        t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denominator
-        u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / denominator
-        
-        return 0 <= t <= 1 and 0 <= u <= 1
+        return angle_diff <= self.vision_angle / 2
 
     def pick_up_puck(self):
         self.carrying_puck = True
@@ -229,81 +123,34 @@ class Robot:
         self.state = 'returning'
 
 class Simulation:
-    def __init__(self, arena_size, num_robots, num_pucks, num_homes, num_obstacles, D, speed, vision_range, robot_radius, render=True):
+    def __init__(self, arena_size, num_robots, num_pucks, num_homes, D, speed, vision_range, robot_radius, render=True):
         self.arena_size = arena_size
         self.numpucks = num_pucks
-        render = True
         self.D = D
         self.num_robots = num_robots
         
-        # Create obstacles
-        self.obstacles = []
-        for _ in range(num_obstacles):
-            # Random size between 2 and 6
-            width = random.uniform(2, 6)
-            height = random.uniform(2, 6)
-            
-            # Random position (ensuring obstacle is fully within arena)
-            x = random.uniform(0, arena_size - width)
-            y = random.uniform(0, arena_size - height)
-            
-            self.obstacles.append(Obstacle(x, y, width, height))
-        
-        # Create home regions (ensuring they don't overlap with obstacles)
         self.home_regions = []
         for _ in range(num_homes):
-            while True:
-                x = random.uniform(0, arena_size)
-                y = random.uniform(0, arena_size)
-                # Check if home region overlaps with any obstacle
-                valid_position = True
-                for obstacle in self.obstacles:
-                    if obstacle.check_collision(x, y, 3):  # Home region radius is 3
-                        valid_position = False
-                        break
-                if valid_position:
-                    self.home_regions.append(HomeRegion(x, y))
-                    break
+            x = random.uniform(0, arena_size)
+            y = random.uniform(0, arena_size)
+            self.home_regions.append(HomeRegion(x, y))
         
-        # Initialize robots (ensuring they don't start inside obstacles)
-        self.robots = []
-        for _ in range(num_robots):
-            while True:
-                x = random.uniform(0, arena_size)
-                y = random.uniform(0, arena_size)
-                valid_position = True
-                for obstacle in self.obstacles:
-                    if obstacle.check_collision(x, y, robot_radius):
-                        valid_position = False
-                        break
-                if valid_position:
-                    self.robots.append(Robot(x, y, arena_size, D, vision_range, 
-                                          robot_radius, self.home_regions, self.obstacles))
-                    break
+        self.robots = [Robot(random.uniform(0, arena_size), random.uniform(0, arena_size),
+                           arena_size, D, vision_range, robot_radius, self.home_regions) 
+                      for _ in range(num_robots)]
         
-        # Randomly distribute pucks (not inside obstacles)
-        self.pucks = []
-        for _ in range(num_pucks):
-            while True:
-                x = random.uniform(0, arena_size)
-                y = random.uniform(0, arena_size)
-                valid_position = True
-                for obstacle in self.obstacles:
-                    if obstacle.check_collision(x, y, 0.5):  # Puck radius is 0.5
-                        valid_position = False
-                        break
-                if valid_position:
-                    self.pucks.append(Puck(x, y))
-                    break
+        self.pucks = [Puck(random.uniform(0, arena_size), random.uniform(0, arena_size)) 
+                     for _ in range(num_pucks)]
 
         self.speed = speed
         self.render = render
+        self.metrics = {'time': [], 'collected_pucks': []}
 
         if self.render:
             self.width = 800
             self.height = 800
             self.screen = pygame.display.set_mode((self.width, self.height))
-            pygame.display.set_caption("FOREST: Foraging Robots in Environment with Static obsTacles")
+            pygame.display.set_caption("Multi-Robot Multi-Home Foraging Simulation")
             self.clock = pygame.time.Clock()
             self.font = pygame.font.Font(None, 36)
 
@@ -323,22 +170,97 @@ class Simulation:
                     robot.drop_puck()
                     robot.current_home.collected_pucks += 1
 
+        total_collected = sum(home.collected_pucks for home in self.home_regions)
+        self.metrics['time'].append(timestep)
+        self.metrics['collected_pucks'].append(total_collected)
+
     def draw(self):
         self.screen.fill(WHITE)
 
-        # Draw obstacles
-        for obstacle in self.obstacles:
-            pygame.draw.rect(self.screen, BLACK,
-                           (int(obstacle.x * self.width / self.arena_size),
-                            int(obstacle.y * self.height / self.arena_size),
-                            int(obstacle.width * self.width / self.arena_size),
-                            int(obstacle.height * self.height / self.arena_size)))
-
-        # Draw home regions
         for home in self.home_regions:
             pygame.draw.circle(self.screen, GREEN, 
                              self.to_screen_coords(home.x, home.y),
                              int(3 * self.width / self.arena_size))
             text = self.font.render(str(home.collected_pucks), True, (0, 0, 0))
             pos = self.to_screen_coords(home.x, home.y)
-            self.screen.blit(text, (pos[0]))
+            self.screen.blit(text, (pos[0] - 10, pos[1] - 10))
+
+        for puck in self.pucks:
+            pygame.draw.circle(self.screen, RED, 
+                             self.to_screen_coords(puck.x, puck.y),
+                             int(0.5 * self.width / self.arena_size))
+
+        for robot in self.robots:
+            color = BLUE if robot.carrying_puck else GRAY
+            pos = self.to_screen_coords(robot.x, robot.y)
+            radius = int(robot.robot_radius * self.width / self.arena_size)
+            pygame.draw.circle(self.screen, color, pos, radius)
+
+            # Draw robot's vision cone
+            vision_length = robot.vision_range * self.width / self.arena_size
+            left_angle = robot.angle - robot.vision_angle / 2
+            right_angle = robot.angle + robot.vision_angle / 2
+            left_end = (pos[0] + vision_length * math.cos(left_angle), 
+                       pos[1] + vision_length * math.sin(left_angle))
+            right_end = (pos[0] + vision_length * math.cos(right_angle), 
+                        pos[1] + vision_length * math.sin(right_angle))
+            pygame.draw.line(self.screen, YELLOW, pos, left_end, 1)
+            pygame.draw.line(self.screen, YELLOW, pos, right_end, 1)
+            pygame.draw.arc(self.screen, YELLOW, 
+                          (pos[0] - vision_length, pos[1] - vision_length,
+                           vision_length * 2, vision_length * 2),
+                          -left_angle, -right_angle, 1)
+
+            pygame.draw.circle(self.screen, YELLOW, 
+                             self.to_screen_coords(robot.origin_x, robot.origin_y),
+                             int(robot.D * self.width / self.arena_size), 1)
+
+        total_collected = sum(home.collected_pucks for home in self.home_regions)
+        text = self.font.render(f'Total collected pucks: {total_collected}', True, (0, 0, 0))
+        self.screen.blit(text, (10, 10))
+
+    def run(self, max_steps):
+        step = 0
+        while step < max_steps:
+            if self.render:
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        return
+
+            self.step(step)
+
+            total_collected = sum(home.collected_pucks for home in self.home_regions)
+            if total_collected >= self.numpucks:
+                break
+        
+            if self.render:
+                self.draw()
+                pygame.display.flip()
+                self.clock.tick(30)
+
+            step += 1
+
+        if self.render:
+            pygame.quit()
+
+    def to_screen_coords(self, x, y):
+        return int(x * self.width / self.arena_size), int(y * self.height / self.arena_size)
+
+def run_simulation():
+    arena_size = 64
+    num_robots = 100
+    num_pucks = 300
+    num_homes = 4  
+    D = 20  
+    speed = 1
+    vision_range = 5
+    robot_radius = 0.5
+    render = True
+    max_steps = 2000
+
+    sim = Simulation(arena_size, num_robots, num_pucks, num_homes, 
+                    D, speed, vision_range, robot_radius, render)
+    sim.run(max_steps)
+
+if __name__ == '__main__':
+    run_simulation()
