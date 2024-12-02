@@ -196,7 +196,6 @@ class Simulation:
             radius = int(robot.robot_radius * self.width / self.arena_size)
             pygame.draw.circle(self.screen, color, pos, radius)
 
-            # Draw robot's vision cone
             vision_length = robot.vision_range * self.width / self.arena_size
             left_angle = robot.angle - robot.vision_angle / 2
             right_angle = robot.angle + robot.vision_angle / 2
